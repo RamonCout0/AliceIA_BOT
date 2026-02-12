@@ -8,20 +8,20 @@ Each task builds on previous tasks with no orphaned code. All components are tes
 
 ## Tasks
 
-- [-] 1. Set up project structure and core infrastructure
+- [x] 1. Set up project structure and core infrastructure
   - Create directory structure: `alice/`, `alice/core/`, `alice/components/`, `alice/utils/`, `tests/`
   - Create `__init__.py` files for all packages
   - Set up `requirements.txt` with dependencies (groq, discord.py, pydantic, pytest, hypothesis, etc.)
   - Create `setup.py` for package installation
   - _Requirements: 1.1, 1.3_
 
-- [ ] 2. Implement Config Manager with secure environment variable handling
-  - [ ] 2.1 Create Config dataclass with all configuration fields
+- [x] 2. Implement Config Manager with secure environment variable handling
+  - [x] 2.1 Create Config dataclass with all configuration fields
     - Define Config dataclass with Groq, Gemini, Discord, history, logging, rate limiting settings
     - Add type hints for all fields
     - _Requirements: 4.1, 4.2, 4.6_
   
-  - [ ] 2.2 Implement ConfigManager class with validation
+  - [x] 2.2 Implement ConfigManager class with validation
     - Load .env file at startup using python-dotenv
     - Validate all required variables are present
     - Validate types (int, str, URL, bool)
@@ -29,7 +29,7 @@ Each task builds on previous tasks with no orphaned code. All components are tes
     - Raise clear errors without exposing values
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.6_
   
-  - [ ]* 2.3 Write property tests for ConfigManager
+  - [-]* 2.3 Write property tests for ConfigManager
     - **Property 8: Config Validation Rejects Missing Required Variables**
     - **Property 9: Config Never Logs Secrets**
     - **Property 10: Config Type Validation**
