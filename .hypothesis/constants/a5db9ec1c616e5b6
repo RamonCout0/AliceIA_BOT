@@ -1,0 +1,4 @@
+# file: C:\Users\Hajik\OneDrive\Documentos\git\Alice\alice\core\logger.py
+# hypothesis_version: 6.151.5
+
+[1024, '%(message)s', '%Y-%m-%dT%H:%M:%S', '+00:00', 'CRITICAL', 'DEBUG', 'ERROR', 'INFO', 'WARNING', 'Z', 'alice', 'alice.log', 'component', 'context', 'level', 'logs', 'message', 'timestamp']
