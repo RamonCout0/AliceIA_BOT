@@ -253,6 +253,14 @@ class ConfigManager:
 
         return True
 
+    def get_config(self) -> Config:
+        """Get the configuration object.
+
+        Returns:
+            Config object
+        """
+        return self._config
+
     def to_dict(self) -> dict:
         """Convert config to dictionary, excluding secrets.
 
