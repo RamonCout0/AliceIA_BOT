@@ -1,0 +1,24 @@
+{
+  "_comentario": "Preencha os campos abaixo. NÃO compartilhe este arquivo com ninguém!",
+
+  "discord_token": "SEU_TOKEN_DO_DISCORD_AQUI",
+
+  "prefix": "!",
+
+  "_comentario_ip": "Coloque aqui o IP PÚBLICO do seu PC (acesse whatismyip.com para descobrir). Se estiver testando localmente, use '127.0.0.1'",
+  "ollama_ip": "SEU_IP_PUBLICO_AQUI",
+
+  "ollama_port": 11434,
+
+  "_comentario_modelo": "Modelos sugeridos: llama3.2:3b (rápido), llama3.1:8b (melhor), mistral:7b (bom no geral)",
+  "ollama_model": "llama3.2:3b",
+
+  "_comentario_sync": "Porta do servidor_local.py no seu PC. Deve coincidir com o que está em servidor_local.py",
+  "sync_port": 5001,
+
+  "_comentario_historico": "Quantas mensagens por usuário antes de começar a limpeza automática",
+  "max_history_por_usuario": 30,
+
+  "_comentario_keep": "Quantas mensagens manter após a limpeza (as mais recentes são sempre preservadas)",
+  "history_keep_apos_limpeza": 15
+}
