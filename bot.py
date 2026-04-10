@@ -1,529 +1,435 @@
 # ============================================================
-#   ALICE — Bot Discord com IA Local via Ollama
-#   Hospedagem: Shardclaud (24/7)  |  IA: Seu PC
-#   Quando PC offline → modo repouso automático
+#  ALICE — bot.py
+#  Roda no: Shardclaud (24/7)
+#  Comunicação com PC: via Redis (Upstash)
 # ============================================================
 
 import discord
 from discord.ext import commands, tasks
 import requests
-from bs4 import BeautifulSoup
 import json
 import os
 import re
 import asyncio
 import random
+import uuid
+import time
 import urllib.parse
-import atexit
 from datetime import datetime
+from bs4 import BeautifulSoup
 
 # ============================================================
-# CONFIGURAÇÃO
+# CONFIG
 # ============================================================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
+BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, 'config_bot.json')
 
 with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-    config = json.load(f)
+    cfg = json.load(f)
 
-TOKEN          = config['discord_token']
-PREFIX         = config.get('prefix', '!')
-OLLAMA_IP      = config['ollama_ip']
-OLLAMA_PORT    = config.get('ollama_port', 11434)
-OLLAMA_MODEL   = config.get('ollama_model', 'llama3.2:3b')
-SYNC_PORT      = config.get('sync_port', 5001)
-MAX_HISTORICO  = config.get('max_history_por_usuario', 30)
-HISTORY_KEEP   = config.get('history_keep_apos_limpeza', 15)
-
-OLLAMA_BASE    = f"http://{OLLAMA_IP}:{OLLAMA_PORT}"
-SYNC_BASE      = f"http://{OLLAMA_IP}:{SYNC_PORT}"
+TOKEN            = cfg['discord_token']
+PREFIX           = cfg.get('prefix', '!')
+REDIS_URL        = cfg['upstash_redis_url']    # ex: https://xxx.upstash.io
+REDIS_TOKEN      = cfg['upstash_redis_token']
+MAX_HIST         = cfg.get('max_historico', 30)
+HIST_KEEP        = cfg.get('hist_keep', 15)
+TIMEOUT_RESP     = cfg.get('timeout_resposta_segundos', 90)
 
 # ============================================================
 # PERSONALIDADE
 # ============================================================
-PERSONALIDADE_PATH = os.path.join(BASE_DIR, 'personalidade.json')
-with open(PERSONALIDADE_PATH, 'r', encoding='utf-8') as f:
-    personalidade = json.load(f)
+PERS_PATH = os.path.join(BASE_DIR, 'personalidade.json')
+with open(PERS_PATH, 'r', encoding='utf-8') as f:
+    pers = json.load(f)
 
 # ============================================================
-# HISTÓRICO
+# HISTÓRICO (salvo localmente no Shardclaud)
 # ============================================================
-HISTORICO_PATH = os.path.join(BASE_DIR, 'historico.json')
+HIST_PATH = os.path.join(BASE_DIR, 'historico.json')
 historico: dict[str, list] = {}
 
 try:
-    with open(HISTORICO_PATH, 'r', encoding='utf-8') as f:
+    with open(HIST_PATH, 'r', encoding='utf-8') as f:
         historico = {str(k): v for k, v in json.load(f).items()}
     print(f"[Histórico] {len(historico)} usuários carregados.")
 except FileNotFoundError:
-    print("[Histórico] Arquivo não encontrado, iniciando vazio.")
-except Exception as e:
-    print(f"[Histórico] Erro ao carregar: {e}")
+    pass
+
+def salvar_historico():
+    try:
+        with open(HIST_PATH, 'w', encoding='utf-8') as f:
+            json.dump(historico, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[Histórico] Erro ao salvar: {e}")
+
+import atexit
+atexit.register(salvar_historico)
+
+# ============================================================
+# REDIS — chamadas via REST (Upstash HTTP API)
+# ============================================================
+_REDIS_HEADERS = {
+    "Authorization": f"Bearer {REDIS_TOKEN}",
+    "Content-Type":  "application/json",
+}
+
+def _redis(cmd: list, timeout: int = 8) -> dict | None:
+    """Executa um comando Redis via Upstash REST API."""
+    try:
+        r = requests.post(
+            f"{REDIS_URL}",
+            headers=_REDIS_HEADERS,
+            json=cmd,
+            timeout=timeout,
+        )
+        return r.json()
+    except Exception as e:
+        print(f"[Redis] Erro: {e}")
+        return None
+
+async def redis_async(cmd: list, timeout: int = 8):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: _redis(cmd, timeout))
+
+async def pc_esta_online() -> bool:
+    """O cliente_pc.py mantém a chave alice:online com TTL de 30s."""
+    r = await redis_async(["GET", "alice:online"])
+    return r is not None and r.get("result") == "1"
+
+async def enfileirar_pedido(payload: dict) -> str:
+    """Empurra um pedido na fila e retorna o request_id."""
+    rid = str(uuid.uuid4())
+    payload["id"] = rid
+    await redis_async(["RPUSH", "alice:fila", json.dumps(payload)])
+    return rid
+
+async def aguardar_resposta(rid: str) -> str | None:
+    """Fica checando a chave alice:resp:<rid> até resposta ou timeout."""
+    chave = f"alice:resp:{rid}"
+    deadline = time.time() + TIMEOUT_RESP
+
+    while time.time() < deadline:
+        r = await redis_async(["GET", chave])
+        if r and r.get("result"):
+            # Limpa a chave após ler
+            await redis_async(["DEL", chave])
+            return r["result"]
+        await asyncio.sleep(1.2)
+
+    return None  # Timeout
+
+# ============================================================
+# BUSCA WEB
+# ============================================================
+FONTES = {
+    'stackoverflow.com':      '💬',
+    'github.com':             '🐙',
+    'python.org':             '🐍',
+    'docs.python.org':        '📚',
+    'pypi.org':               '📦',
+    'developer.mozilla.org':  '🌐',
+    'w3schools.com':          '🎓',
+    'geeksforgeeks.org':      '🧠',
+    'realpython.com':         '🎯',
+    'learn.microsoft.com':    '🪟',
+    'nodejs.org':             '🟩',
+    'npmjs.com':              '📦',
+    'reactjs.org':            '⚛️',
+    'docs.djangoproject.com': '🎸',
+    'rust-lang.org':          '🦀',
+    'go.dev':                 '🐹',
+    'docs.docker.com':        '🐳',
+}
+
+GATILHOS_PESQUISA = [
+    'como', 'instalar', 'configurar', 'tutorial', 'erro', 'bug', 'exception',
+    'o que é', 'qual', 'diferença', 'pip install', 'npm install', 'yarn add',
+    'python', 'javascript', 'typescript', 'java', 'rust', 'go', 'kotlin',
+    'react', 'vue', 'angular', 'next', 'django', 'flask', 'fastapi',
+    'sql', 'mongodb', 'redis', 'docker', 'git', 'api', 'rest', 'graphql',
+    'async', 'await', 'thread', 'algoritmo', 'array', 'lista', 'classe',
+    'debug', 'deploy', 'servidor', 'aws', 'cloud', 'linux', 'bash', 'cmd',
+]
+
+def deve_pesquisar(texto: str) -> bool:
+    t = texto.lower()
+    return any(g in t for g in GATILHOS_PESQUISA)
+
+def buscar_web(pergunta: str) -> str:
+    try:
+        sites = " OR ".join(f"site:{d}" for d in list(FONTES)[:8])
+        q     = urllib.parse.quote(f"{pergunta} {sites}")
+        url   = f"https://www.google.com/search?q={q}&hl=pt-BR&num=10"
+        hdrs  = {"User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )}
+        resp  = requests.get(url, headers=hdrs, timeout=12)
+        soup  = BeautifulSoup(resp.text, 'html.parser')
+
+        vistos, resultados = set(), []
+        for a in soup.find_all('a', href=re.compile(r'^/url\?q=')):
+            try:
+                raw   = re.findall(r'q=(.*?)&', a['href'])[0]
+                link  = urllib.parse.unquote(raw)
+                match = next((d for d in FONTES if d in link), None)
+                if not match or link in vistos:
+                    continue
+                vistos.add(link)
+                titulo = (a.find('h3') or a).get_text().strip()
+                if len(titulo) > 5:
+                    resultados.append({"titulo": titulo, "url": link, "emoji": FONTES[match]})
+            except Exception:
+                continue
+
+        if not resultados:
+            return ""
+        return "\n\n".join(
+            f"{r['emoji']} **{r['titulo']}**\n{r['url']}"
+            for r in resultados[:3]
+        )
+    except Exception as e:
+        print(f"[Web] Erro: {e}")
+        return ""
+
+# ============================================================
+# HISTÓRICO — limpeza inteligente
+# ============================================================
+_TRIVIAIS = {
+    'oi','oii','oiii','olá','ola','ok','okay','blz','obrigado','obg','vlw',
+    'valeu','certo','entendi','sim','não','nao','nop','yep','ae','aew',
+    'rs','rsrs','kkk','lol','hmm','ah','oh','né','ne','ta','tá','to','tô',
+}
+
+def _relevante(msg: dict) -> bool:
+    c = msg.get('content', '').strip().lower()
+    if len(c) < 8 or c in _TRIVIAIS:
+        return False
+    if len(c) < 20 and '?' not in c and not any(g in c for g in GATILHOS_PESQUISA):
+        return False
+    return True
+
+def limpar_historico(msgs: list) -> list:
+    if len(msgs) <= MAX_HIST:
+        return msgs
+    recentes  = msgs[-HIST_KEEP:]
+    antigas   = msgs[:-HIST_KEEP]
+    relevantes = []
+    for i in range(0, len(antigas) - 1, 2):
+        u = antigas[i]
+        a = antigas[i + 1] if i + 1 < len(antigas) else None
+        if _relevante(u) and a:
+            relevantes.extend([u, a])
+    comprimidas = relevantes[-(MAX_HIST - HIST_KEEP):]
+    resultado   = comprimidas + recentes
+    removidas   = len(msgs) - len(resultado)
+    if removidas > 0:
+        print(f"[Histórico] Limpeza: -{removidas} msgs irrelevantes.")
+    return resultado
+
+# ============================================================
+# UTILITÁRIOS
+# ============================================================
+_EMOJIS = ['😊','❤️','✨','🔥','💡','👍','🚀','😄']
+
+def estilizar(texto: str) -> str:
+    if random.random() < 0.28:
+        texto = texto.rstrip() + " " + random.choice(_EMOJIS)
+    return texto
+
+async def enviar_longo(message: discord.Message, texto: str):
+    LIMITE = 1900
+    if len(texto) <= LIMITE:
+        await message.reply(texto)
+        return
+    partes, resto = [], texto
+    while resto:
+        if len(resto) <= LIMITE:
+            partes.append(resto); break
+        bloco = resto[:LIMITE]
+        corte = max(bloco.rfind('\n'), bloco.rfind('. '))
+        corte = corte if corte > 0 else LIMITE
+        partes.append(resto[:corte])
+        resto = resto[corte:].lstrip()
+    for i, p in enumerate(partes):
+        if i == 0: await message.reply(p)
+        else:      await message.channel.send(p)
+        await asyncio.sleep(0.3)
 
 # ============================================================
 # BOT
 # ============================================================
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
+intents.members         = True
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
-pc_online = False  # Estado global do PC
-
 # ============================================================
-# VERIFICAÇÃO DO PC / OLLAMA
-# ============================================================
-def verificar_ollama() -> bool:
-    """Tenta bater no endpoint do Ollama para saber se o PC está ligado."""
-    try:
-        r = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=5)
-        return r.status_code == 200
-    except Exception:
-        return False
-
-# ============================================================
-# BUSCA WEB
-# ============================================================
-DOMINIOS_CONFIAVEIS = {
-    'stackoverflow.com':         '💬',
-    'github.com':                '🐙',
-    'python.org':                '🐍',
-    'docs.python.org':           '📚',
-    'pypi.org':                  '📦',
-    'developer.mozilla.org':     '🌐',
-    'w3schools.com':             '🎓',
-    'geeksforgeeks.org':         '🧠',
-    'realpython.com':            '🎯',
-    'learn.microsoft.com':       '🪟',
-    'nodejs.org':                '🟩',
-    'npmjs.com':                 '📦',
-    'reactjs.org':               '⚛️',
-    'docs.djangoproject.com':    '🎸',
-    'rust-lang.org':             '🦀',
-    'go.dev':                    '🐹',
-    'docs.docker.com':           '🐳',
-}
-
-PALAVRAS_QUE_PEDEM_PESQUISA = [
-    'como', 'instalar', 'configurar', 'setup', 'tutorial', 'erro', 'bug',
-    'exception', 'error', 'traceback', 'o que é', 'o que e', 'qual',
-    'quando', 'por que', 'por q', 'diferença entre', 'melhor forma',
-    'pip install', 'npm install', 'yarn add', 'apt install',
-    'python', 'javascript', 'typescript', 'java', 'c++', 'rust', 'go',
-    'kotlin', 'swift', 'flutter', 'react', 'vue', 'angular', 'next',
-    'django', 'flask', 'fastapi', 'express', 'node', 'docker',
-    'sql', 'mongodb', 'redis', 'postgres', 'mysql', 'sqlite',
-    'git', 'github', 'api', 'rest', 'graphql', 'websocket',
-    'async', 'await', 'thread', 'recursão', 'algoritmo', 'complexidade',
-    'array', 'lista', 'dict', 'objeto', 'classe', 'função', 'lambda',
-    'debug', 'deploy', 'servidor', 'cloud', 'aws', 'gcp', 'azure',
-]
-
-def deve_pesquisar(pergunta: str) -> bool:
-    lower = pergunta.lower()
-    return any(p in lower for p in PALAVRAS_QUE_PEDEM_PESQUISA)
-
-def buscar_web(pergunta: str) -> str:
-    """Busca no Google e retorna fontes confiáveis encontradas."""
-    try:
-        dominios_query = " OR ".join(f"site:{d}" for d in list(DOMINIOS_CONFIAVEIS.keys())[:8])
-        query_enc = urllib.parse.quote(f"{pergunta} {dominios_query}")
-        url = f"https://www.google.com/search?q={query_enc}&hl=pt-BR&num=10"
-        headers = {
-            'User-Agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 (KHTML, like Gecko) '
-                'Chrome/120.0.0.0 Safari/537.36'
-            )
-        }
-
-        resp = requests.get(url, headers=headers, timeout=12)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-
-        resultados = []
-        for a in soup.find_all('a', href=re.compile(r'^/url\?q=')):
-            try:
-                url_real = urllib.parse.unquote(re.findall(r'q=(.*?)&', a['href'])[0])
-                dominio_match = next((d for d in DOMINIOS_CONFIAVEIS if d in url_real), None)
-                if not dominio_match:
-                    continue
-                titulo_el = a.find('h3') or a
-                titulo = titulo_el.get_text().strip()
-                if len(titulo) > 5 and url_real not in [r['url'] for r in resultados]:
-                    resultados.append({
-                        'titulo':  titulo,
-                        'url':     url_real,
-                        'emoji':   DOMINIOS_CONFIAVEIS[dominio_match],
-                    })
-            except Exception:
-                continue
-
-        if not resultados:
-            return ""
-
-        linhas = []
-        for r in resultados[:3]:
-            linhas.append(f"{r['emoji']} **{r['titulo']}**\n{r['url']}")
-        return "\n\n".join(linhas)
-
-    except Exception as e:
-        print(f"[Web] Erro na busca: {e}")
-        return ""
-
-# ============================================================
-# HISTÓRICO — FILTRAGEM E LIMPEZA AUTOMÁTICA
-# ============================================================
-_TRIVIAIS = {
-    'oi', 'oii', 'oiii', 'olá', 'ola', 'ok', 'okay', 'blz', 'blzinha',
-    'obrigado', 'obg', 'vlw', 'valeu', 'certo', 'entendi', 'sim', 'não',
-    'nao', 'nop', 'yep', 'yeah', 'tá', 'ta', 'tô', 'to', 'ae', 'aew',
-}
-
-def _e_relevante(msg: dict) -> bool:
-    """Retorna True se a mensagem tem conteúdo que vale manter no histórico longo."""
-    conteudo = msg.get('content', '').strip().lower()
-    if len(conteudo) < 8:
-        return False
-    if conteudo in _TRIVIAIS:
-        return False
-    # Mensagens curtas demais e sem sinal de pergunta real
-    if len(conteudo) < 20 and '?' not in conteudo and not any(p in conteudo for p in PALAVRAS_QUE_PEDEM_PESQUISA):
-        return False
-    return True
-
-def limpar_historico(msgs: list) -> list:
-    """
-    Se o histórico de um usuário passar de MAX_HISTORICO mensagens:
-    - Mantém as HISTORY_KEEP mais recentes intactas
-    - Das mais antigas, guarda apenas pares relevantes (dúvidas reais, programação)
-    """
-    if len(msgs) <= MAX_HISTORICO:
-        return msgs
-
-    recentes  = msgs[-HISTORY_KEEP:]
-    antigas   = msgs[:-HISTORY_KEEP]
-    relevantes = []
-
-    # Percorre pares user ↔ assistant
-    for i in range(0, len(antigas) - 1, 2):
-        user_msg  = antigas[i]
-        assist_msg = antigas[i + 1] if i + 1 < len(antigas) else None
-        if _e_relevante(user_msg) and assist_msg:
-            relevantes.extend([user_msg, assist_msg])
-
-    # Limita as antigas relevantes para não crescer infinitamente
-    comprimidas = relevantes[-(MAX_HISTORICO - HISTORY_KEEP):]
-    resultado = comprimidas + recentes
-
-    removidas = len(msgs) - len(resultado)
-    if removidas > 0:
-        print(f"[Histórico] Limpeza: {removidas} mensagens removidas por irrelevância.")
-
-    return resultado
-
-# ============================================================
-# SALVAR HISTÓRICO
-# ============================================================
-def salvar_historico():
-    try:
-        with open(HISTORICO_PATH, 'w', encoding='utf-8') as f:
-            json.dump(historico, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[Histórico] Erro ao salvar: {e}")
-
-def sincronizar_com_pc():
-    """
-    Envia o histórico para o servidor_local.py rodando no PC do usuário.
-    Falha silenciosa — não é crítico se o PC estiver off.
-    """
-    try:
-        requests.post(
-            f"{SYNC_BASE}/sync_historico",
-            json=historico,
-            timeout=8
-        )
-    except Exception:
-        pass  # PC desligado ou sync não disponível
-
-atexit.register(salvar_historico)
-
-# ============================================================
-# CHAMADA AO OLLAMA (HTTP direto — sem biblioteca ollama)
-# ============================================================
-async def chamar_ollama(mensagens: list) -> str:
-    payload = {
-        "model":   OLLAMA_MODEL,
-        "messages": mensagens,
-        "stream":  False,
-        "options": {
-            "num_predict": 900,
-            "temperature": 0.72,
-            "top_p":       0.9,
-        }
-    }
-
-    loop = asyncio.get_event_loop()
-
-    def _post():
-        r = requests.post(
-            f"{OLLAMA_BASE}/api/chat",
-            json=payload,
-            timeout=150
-        )
-        r.raise_for_status()
-        return r.json()
-
-    data = await loop.run_in_executor(None, _post)
-    return data['message']['content'].strip()
-
-# ============================================================
-# UTILITÁRIOS DE ESTILO
-# ============================================================
-_EMOJIS_FINAIS = ['😊', '❤️', '✨', '🔥', '💡', '👍', '🚀', '😄']
-
-def aplicar_estilo(texto: str) -> str:
-    if random.random() < 0.30:
-        texto = texto.rstrip() + " " + random.choice(_EMOJIS_FINAIS)
-    return texto
-
-async def enviar_longo(message: discord.Message, texto: str):
-    """Divide e envia mensagens que excedem o limite do Discord."""
-    LIMITE = 1900
-    if len(texto) <= LIMITE:
-        await message.reply(texto)
-        return
-
-    partes = []
-    while texto:
-        if len(texto) <= LIMITE:
-            partes.append(texto)
-            break
-        bloco = texto[:LIMITE]
-        # Corta no último \n para não quebrar código
-        corte = bloco.rfind('\n')
-        if corte == -1:
-            corte = LIMITE
-        partes.append(texto[:corte])
-        texto = texto[corte:].lstrip()
-
-    for i, parte in enumerate(partes):
-        if i == 0:
-            await message.reply(parte)
-        else:
-            await message.channel.send(parte)
-        await asyncio.sleep(0.4)
-
-# ============================================================
-# SYSTEM PROMPT DA ALICE
-# ============================================================
-SYSTEM_PROMPT = f"""Você é Alice, uma amiga descontraída, inteligente e sociável do servidor Discord.
-
-═══ PERSONALIDADE ═══
-• Comunicativa, animada e acolhedora — trata bem TODOS no servidor
-• Linguagem informal e natural, como uma amiga real conversando
-• Usa gírias com moderação: "cara", "mano", "33", "gap", "ich", "betinha"
-• Emojis com moderação — nunca exagera, evita no meio de frases
-• Bom humor natural, sem forçar piada
-• Direta ao ponto — sem enrolação nem respostas genéricas de IA
-
-═══ PARA PROGRAMAÇÃO ═══
-• Respostas PRÁTICAS com código real quando a pergunta pede
-• Explica o "por quê" de forma simples e direta
-• Usa blocos de código formatados corretamente (```python, ```js, etc.)
-• Se receber resultados de pesquisa, usa as fontes para complementar a resposta
-• Nunca deixa um bloco de código inacabado — sempre conclui
-
-═══ REGRAS ═══
-• NUNCA deixe uma resposta pela metade
-• Se for muito longa, quebre em partes lógicas
-• Não finja ser humano se perguntarem diretamente
-• Não invente informações técnicas — prefira dizer "não sei" se não tiver certeza
-• Respeite todos os usuários, independente do nível deles
-
-Nome: {personalidade['nome']}
-Tom: {personalidade['tom']}
-"""
-
-# ============================================================
-# EVENTO PRINCIPAL — ON_MESSAGE
+# EVENTO PRINCIPAL
 # ============================================================
 @bot.event
 async def on_message(message: discord.Message):
-    global pc_online
-
     if message.author.bot:
         return
-
     await bot.process_commands(message)
 
-    # Só responde quando for mencionada
     if bot.user not in message.mentions:
         return
 
     pergunta = message.content.replace(f'<@{bot.user.id}>', '').strip()
-
-    # Mensagem vazia / curta
     if not pergunta or len(pergunta) < 2:
-        await message.reply(personalidade['frases_fixas']['saudacao'])
+        await message.reply(pers['frases_fixas']['saudacao'])
         return
 
-    # ─── VERIFICA SE PC ESTÁ ONLINE ───
-    pc_online = await asyncio.get_event_loop().run_in_executor(None, verificar_ollama)
-
-    if not pc_online:
+    # ── Verifica PC ──────────────────────────────────────────
+    online = await pc_esta_online()
+    if not online:
         await message.reply(
-            "😴 Ei, tô em **modo repouso** agora!\n"
-            "Meu PC tá desligado no momento, então não consigo pensar direito. 💤\n"
-            "Volta mais tarde que estarei de volta na ativa! 👋"
+            "😴 **Modo Repouso**\n"
+            "Meu PC tá desligado agora, então não consigo pensar direito. "
+            "Volta mais tarde que estarei de volta na ativa! 💤"
         )
         return
 
-    # ─── PROCESSAMENTO COM IA ───
-    async def processar():
+    # ── Busca web (se necessário) ─────────────────────────────
+    contexto_web = ""
+    if deve_pesquisar(pergunta):
         async with message.channel.typing():
-            try:
-                user_id = str(message.author.id)
-                msgs_usuario = historico.get(user_id, [])
-                msgs_usuario.append({'role': 'user', 'content': pergunta})
+            loop = asyncio.get_event_loop()
+            contexto_web = await loop.run_in_executor(None, buscar_web, pergunta)
 
-                # Busca web (se for dúvida de programação)
-                contexto_web = ""
-                if deve_pesquisar(pergunta):
-                    contexto_web = await asyncio.get_event_loop().run_in_executor(
-                        None, buscar_web, pergunta
-                    )
+    # ── Monta histórico + system prompt ──────────────────────
+    uid  = str(message.author.id)
+    msgs = list(historico.get(uid, []))
+    msgs.append({'role': 'user', 'content': pergunta})
 
-                # Monta o contexto do sistema com pesquisa (se houver)
-                system_final = SYSTEM_PROMPT
-                if contexto_web:
-                    system_final += (
-                        "\n\n═══ RESULTADOS DA PESQUISA ═══\n"
-                        "Use estas fontes para embasar sua resposta, mas responda com suas próprias palavras:\n\n"
-                        + contexto_web
-                    )
+    system = f"""Você é Alice, uma amiga descontraída e inteligente do servidor Discord.
 
-                msgs_ollama = [{'role': 'system', 'content': system_final}]
-                msgs_ollama += msgs_usuario[-10:]  # Contexto das últimas 10 msgs
+PERSONALIDADE:
+• Acolhedora e sociável — trata bem TODOS do servidor
+• Linguagem informal e natural, como uma amiga real
+• Gírias com moderação: "cara", "mano", "33", "gap", "ich"
+• Emojis com moderação (máximo 1-2 por resposta, nunca no meio de frases)
+• Bom humor natural, sem forçar piada
+• Direta ao ponto — sem enrolação
 
-                resposta = await chamar_ollama(msgs_ollama)
-                resposta = aplicar_estilo(resposta)
+PROGRAMAÇÃO:
+• Respostas práticas com código real quando pedido
+• Sempre completa os blocos de código — nunca deixa inacabado
+• Usa ```python, ```js, etc. corretamente
+• Explica o "por quê" de forma simples
+{f"• FONTES PESQUISADAS para embasar a resposta:{chr(10)}{contexto_web}" if contexto_web else ""}
 
-                msgs_usuario.append({'role': 'assistant', 'content': resposta})
+REGRAS:
+• Nunca deixe resposta pela metade
+• Não invente informações técnicas — diga "não sei" se precisar
+• Respeite todos, independente do nível deles"""
 
-                # Limpa e salva
-                historico[user_id] = limpar_historico(msgs_usuario)
-                salvar_historico()
+    # ── Enfileira no Redis ────────────────────────────────────
+    payload = {
+        "system":    system,
+        "mensagens": msgs[-10:],   # Últimas 10 para contexto
+        "user_id":   uid,
+        "username":  message.author.display_name,
+    }
 
-                # Sincroniza com PC em background (não bloqueia o bot)
-                bot.loop.run_in_executor(None, sincronizar_com_pc)
+    async with message.channel.typing():
+        try:
+            rid      = await enfileirar_pedido(payload)
+            resposta = await aguardar_resposta(rid)
+        except Exception as e:
+            print(f"[IA] Erro na fila: {e}")
+            resposta = None
 
-                # Monta resposta final com fontes
-                resposta_final = resposta
-                if contexto_web:
-                    resposta_final += f"\n\n🔍 **Fontes pesquisadas:**\n{contexto_web}"
+    if resposta is None:
+        await message.reply(
+            "⏳ Demorou mais que o esperado... "
+            "Meu PC pode estar ocupado. Tenta de novo! 😅"
+        )
+        return
 
-                await enviar_longo(message, resposta_final)
+    resposta = estilizar(resposta)
 
-            except requests.exceptions.ConnectionError:
-                # PC ficou offline durante o processamento
-                pc_online = False
-                await message.reply(
-                    "😴 Ops, meu PC desligou no meio do caminho!\n"
-                    "Volta mais tarde, tá? 💤"
-                )
-            except requests.exceptions.Timeout:
-                await message.reply(
-                    "⏳ Demorou mais que o esperado aqui...\n"
-                    "Meu PC pode estar pesado. Tenta de novo em um segundo!"
-                )
-            except Exception as e:
-                print(f"[IA] Erro inesperado: {e}")
-                await message.reply(personalidade['frases_fixas']['erro'])
+    # ── Salva histórico ───────────────────────────────────────
+    msgs.append({'role': 'assistant', 'content': resposta})
+    historico[uid] = limpar_historico(msgs)
+    salvar_historico()
 
-    asyncio.create_task(processar())
+    # ── Resposta final ────────────────────────────────────────
+    texto_final = resposta
+    if contexto_web:
+        texto_final += f"\n\n🔍 **Fontes:**\n{contexto_web}"
 
-# ============================================================
-# TASK — CHECAGEM PERIÓDICA DO PC
-# ============================================================
-@tasks.loop(minutes=5)
-async def checar_pc():
-    global pc_online
-    estado_anterior = pc_online
-    pc_online = await asyncio.get_event_loop().run_in_executor(None, verificar_ollama)
-
-    agora = datetime.now().strftime('%H:%M')
-    if pc_online != estado_anterior:
-        status = "🟢 VOLTOU ONLINE" if pc_online else "🔴 FICOU OFFLINE (modo repouso)"
-        print(f"[{agora}] PC mudou de estado: {status}")
-    else:
-        print(f"[{agora}] PC: {'🟢 online' if pc_online else '😴 offline'}")
+    await enviar_longo(message, texto_final)
 
 # ============================================================
 # COMANDOS
 # ============================================================
 @bot.command(name='ping')
 async def ping(ctx):
-    ms = round(bot.latency * 1000)
-    status_pc = "🟢 Online" if pc_online else "😴 Repouso"
-    await ctx.send(f"🏓 Pong! `{ms}ms` · PC: {status_pc}")
-
+    ms     = round(bot.latency * 1000)
+    online = await pc_esta_online()
+    estado = "🟢 PC Online" if online else "😴 PC em Repouso"
+    await ctx.send(f"🏓 Pong! `{ms}ms` · {estado}")
 
 @bot.command(name='status')
 async def status(ctx):
-    cor = 0x00FF7F if pc_online else 0xFF6B6B
-    embed = discord.Embed(title="🖥️ Status do Sistema", color=cor)
+    online = await pc_esta_online()
+    cor    = 0x00FF7F if online else 0xFF6B6B
+    embed  = discord.Embed(title="🖥️ Status da Alice", color=cor)
     embed.add_field(
         name="PC / Ollama",
-        value="🟢 Conectado e rodando" if pc_online else "😴 Offline — modo repouso ativo",
+        value="🟢 Online e respondendo" if online else "😴 Offline — modo repouso ativo",
         inline=False
     )
-    embed.add_field(name="Modelo",  value=f"`{OLLAMA_MODEL}`",        inline=True)
-    embed.add_field(name="Usuários no histórico", value=str(len(historico)), inline=True)
-    total = sum(len(v) for v in historico.values())
-    embed.add_field(name="Total de mensagens salvas", value=str(total), inline=True)
-    embed.set_footer(text=f"Endpoint: {OLLAMA_BASE}")
+    total  = sum(len(v) for v in historico.values())
+    embed.add_field(name="Usuários no histórico",   value=str(len(historico)), inline=True)
+    embed.add_field(name="Total de mensagens",       value=str(total),         inline=True)
+    embed.add_field(name="Limpeza automática",       value=f">{MAX_HIST} msgs/usuário", inline=True)
+    embed.set_footer(text="Sistema: Redis (Upstash) como fila de mensagens")
     await ctx.send(embed=embed)
-
 
 @bot.command(name='info')
 async def info(ctx):
-    embed = discord.Embed(
-        title=f"🤖 {personalidade['nome']}",
-        description=personalidade['personalidade'],
+    online = await pc_esta_online()
+    embed  = discord.Embed(
+        title=f"🤖 {pers['nome']}",
+        description=pers['personalidade'],
         color=0xFF69B4
     )
-    embed.add_field(name="🧠 Modelo",    value=OLLAMA_MODEL,            inline=True)
-    embed.add_field(name="💬 Tom",       value=personalidade['tom'],     inline=True)
-    embed.add_field(name="🖥️ PC",        value="🟢 Online" if pc_online else "😴 Repouso", inline=True)
-    embed.add_field(name="👥 Usuários",  value=str(len(historico)),      inline=True)
-    embed.add_field(name="📚 Histórico", value=f"Máx {MAX_HISTORICO} msgs/usuário\nLimpeza automática ativa", inline=True)
+    embed.add_field(name="💬 Tom",       value=pers['tom'],                              inline=True)
+    embed.add_field(name="🖥️ PC",        value="🟢 Online" if online else "😴 Repouso", inline=True)
+    embed.add_field(name="👥 Usuários",  value=str(len(historico)),                      inline=True)
     embed.set_footer(text="Desenvolvida com ❤️ pra esse servidor!")
     await ctx.send(embed=embed)
-
 
 @bot.command(name='ajuda')
 async def ajuda(ctx):
     embed = discord.Embed(
         title="📋 Comandos da Alice",
-        description="Mencione **@Alice** para conversar! Ela pesquisa na web por você. 🔍",
+        description="Mencione **@Alice** pra conversar! Ela pesquisa na web pra te ajudar com código. 🔍",
         color=0x00BFFF
     )
     embed.add_field(
         name="💬 Chat com IA",
         value=(
-            "`@Alice <mensagem>` — Conversa normal ou dúvida de programação\n"
-            "Ex: `@Alice como fazer uma API REST em FastAPI?`\n"
-            "Ex: `@Alice qual a diferença entre list e tuple em Python?`"
+            "`@Alice <mensagem>` — Chat ou dúvida de programação\n"
+            "Exemplos:\n"
+            "> `@Alice como fazer uma API em FastAPI?`\n"
+            "> `@Alice qual a diferença entre list e tuple?`\n"
+            "> `@Alice tô tendo esse erro: AttributeError...`"
         ),
         inline=False
     )
     embed.add_field(
         name="⚙️ Utilitários",
         value=(
-            "`!ping` — Latência e status do PC\n"
-            "`!status` — Status detalhado do sistema\n"
-            "`!info` — Informações da Alice\n"
-            "`!reset` — Limpa seu histórico com ela"
+            "`!ping` — Latência + status do PC\n"
+            "`!status` — Status detalhado\n"
+            "`!info` — Sobre a Alice\n"
+            "`!reset` — Limpa seu histórico\n"
+            "`!hist` — Quantas msgs você tem no histórico"
         ),
         inline=False
     )
@@ -532,14 +438,13 @@ async def ajuda(ctx):
         value=(
             "`!fun dado` — Rola um dado 🎲\n"
             "`!fun moeda` — Cara ou coroa 🪙\n"
-            "`!fun piada` — Piada de programador 😄\n"
+            "`!fun piada` — Piada de dev 😄\n"
             "`!fun abraço` — Distribui carinho 🤗"
         ),
         inline=False
     )
-    embed.set_footer(text="Dica: A Alice aprende com o histórico de conversa de cada um!")
+    embed.set_footer(text="Dica: O histórico dela com você é persistente e privado!")
     await ctx.send(embed=embed)
-
 
 @bot.command(name='reset')
 async def reset(ctx):
@@ -547,79 +452,81 @@ async def reset(ctx):
     if uid in historico:
         del historico[uid]
         salvar_historico()
-        await ctx.send(f"🔄 {ctx.author.mention} Pronto, começamos do zero! 😊")
+        await ctx.send(f"🔄 {ctx.author.mention} Histórico limpo! Começamos do zero. 😊")
     else:
-        await ctx.send(f"🤷 {ctx.author.mention} Você ainda não tem histórico comigo!")
+        await ctx.send(f"🤷 {ctx.author.mention} Você não tem histórico salvo comigo ainda!")
 
+@bot.command(name='hist')
+async def hist(ctx):
+    uid  = str(ctx.author.id)
+    msgs = historico.get(uid, [])
+    await ctx.send(
+        f"📚 {ctx.author.mention} Você tem **{len(msgs)}** mensagens no histórico comigo.\n"
+        f"Limpeza automática ativa acima de **{MAX_HIST}** mensagens."
+    )
 
 @bot.command(name='fun')
 async def fun(ctx, comando: str = "piada"):
     opcoes = {
-        "dado": (
-            f"🎲 {ctx.author.mention} rolou um dado e tirou... "
-            f"**{random.randint(1, 6)}**!"
-        ),
-        "moeda": (
-            f"🪙 {ctx.author.mention} jogou a moeda e saiu: "
-            f"**{'CARA' if random.random() > 0.5 else 'COROA'}**!"
-        ),
+        "dado":  f"🎲 {ctx.author.mention} rolou um dado e tirou **{random.randint(1, 6)}**!",
+        "moeda": f"🪙 {ctx.author.mention} jogou a moeda: **{'CARA' if random.random() > .5 else 'COROA'}**!",
         "piada": random.choice([
-            "Por que o Python foi ao psicólogo? Porque tinha muitos `complex`! 🐍",
+            "Por que o Python foi ao psicólogo? Tinha muitos `complex`! 🐍",
             "Qual é o café favorito do dev? Java! ☕",
             "Um loop infinito entrou num bar. O bartender perguntou: 'De novo?' 🔄",
-            "404: Piada não encontrada. Tenta de novo amanhã! 🤖",
-            "Por que o dev usa óculos escuros? Porque não suporta Java sem eles! 😎",
+            "404: Piada não encontrada. Tenta amanhã! 🤖",
             "Por que o git commit foi à terapia? Tinha muito histórico pra resolver. 😅",
-            "Como se chama um dev sem café? Depende. (É uma exceção não tratada.) ☕💥",
+            "Como se chama um dev sem café? Exceção não tratada. ☕💥",
+            "Por que o JavaScript é igual ao café? Porque sem ele nada funciona... e com ele, às vezes também não! 😂",
         ]),
-        "abraço": f"🤗 {ctx.author.mention} distribuiu abraços pra galera do servidor!",
+        "abraço": f"🤗 {ctx.author.mention} distribuiu abraços pra toda a galera!",
     }
-    resposta = opcoes.get(comando.lower(), "❓ Use: `dado`, `moeda`, `piada` ou `abraço`")
-    await ctx.send(resposta)
+    await ctx.send(opcoes.get(comando.lower(), "❓ Use: `dado`, `moeda`, `piada` ou `abraço`"))
 
 # ============================================================
-# ERROS DE COMANDO
+# ERROS
 # ============================================================
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Você não tem permissão pra isso!")
+        await ctx.send("❌ Sem permissão pra isso!")
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Faltou um argumento! Use `!ajuda` para ver como usar.")
+        await ctx.send("❌ Faltou argumento! Use `!ajuda`.")
     else:
-        print(f"[Erro de comando] {error}")
+        print(f"[CmdErro] {error}")
 
 # ============================================================
 # ON_READY
 # ============================================================
+@tasks.loop(minutes=2)
+async def log_status():
+    online = await pc_esta_online()
+    agora  = datetime.now().strftime('%H:%M')
+    print(f"[{agora}] PC: {'🟢 online' if online else '😴 offline'} | Usuários: {len(historico)}")
+
 @bot.event
 async def on_ready():
-    global pc_online
     print("=" * 50)
-    print(f"  Alice online! → {bot.user}")
-    print(f"  Ollama em: {OLLAMA_BASE}")
-    print(f"  Modelo: {OLLAMA_MODEL}")
+    print(f"  Alice online → {bot.user}")
     print(f"  Prefix: {PREFIX}")
+    print(f"  Redis: {REDIS_URL[:35]}...")
     print("=" * 50)
-
-    # Verifica estado inicial do PC
-    pc_online = await asyncio.get_event_loop().run_in_executor(None, verificar_ollama)
-    print(f"  PC: {'🟢 Online' if pc_online else '😴 Offline (modo repouso)'}")
-
-    # Inicia checagem periódica
-    checar_pc.start()
-
-    # Status no Discord
-    atividade = discord.Activity(
+    online = await pc_esta_online()
+    print(f"  PC: {'🟢 Online' if online else '😴 Offline (modo repouso)'}")
+    log_status.start()
+    await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.listening,
         name="@Alice pra conversar!"
-    )
-    await bot.change_presence(activity=atividade)
+    ))
 
-# ============================================================
-# INICIAR
-# ============================================================
+async def main():
+    async with bot:
+        await bot.load_extension('github_cog')
+        print("[GitHub] Cog carregado!")
+        await bot.start(TOKEN)
+
 print("Iniciando Alice...")
-bot.run(TOKEN)
+import asyncio as _asyncio
+_asyncio.run(main())

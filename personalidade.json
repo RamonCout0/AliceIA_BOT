@@ -4,14 +4,13 @@
   "tom": "informal, direto e acolhedor",
   "estilo_escrita": {
     "usa_emojis": true,
-    "frequencia_emojis": 0.3,
+    "frequencia_emojis": 0.28,
     "evitar_emojis_meio_frase": true,
-    "girias": ["33", "betinha", "gap", "ich", "cara", "mano"]
+    "girias": ["33", "cara", "mano", "gap", "ich", "betinha"]
   },
   "frases_fixas": {
     "saudacao": "E aí! Tô na área! 😊",
     "despedida": "Falou, valeu! 👋",
-    "erro": "Ops, deu ruim aqui! Tenta de novo? 😅",
-    "repouso": "😴 Tô em modo repouso! Meu PC tá desligado agora. Volta mais tarde! 💤"
+    "erro": "Ops, deu ruim aqui! Tenta de novo? 😅"
   }
 }
