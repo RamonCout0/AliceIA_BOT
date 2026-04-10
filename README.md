@@ -1,4 +1,4 @@
-# 🤖 Alice v2 — Arquitetura Redis
+# 🤖 Alice 1.7 — Arquitetura Redis
 
 ## Por que funciona (e o ngrok/tunnel não funcionava)
 
