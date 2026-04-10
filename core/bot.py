@@ -21,8 +21,8 @@ from bs4 import BeautifulSoup
 # ============================================================
 # CONFIG
 # ============================================================
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, 'config_bot.json')
+BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'config_bot.json')
 
 with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
     cfg = json.load(f)
@@ -38,7 +38,7 @@ TIMEOUT_RESP     = cfg.get('timeout_resposta_segundos', 90)
 # ============================================================
 # PERSONALIDADE
 # ============================================================
-PERS_PATH = os.path.join(BASE_DIR, 'personalidade.json')
+PERS_PATH = os.path.join(BASE_DIR, 'config', 'personalidade.json')
 with open(PERS_PATH, 'r', encoding='utf-8') as f:
     pers = json.load(f)
 
@@ -523,7 +523,7 @@ async def on_ready():
 
 async def main():
     async with bot:
-        await bot.load_extension('github_cog')
+        await bot.load_extension('cogs.github_cog')
         print("[GitHub] Cog carregado!")
         await bot.start(TOKEN)
 

@@ -24,17 +24,25 @@ Usuário no Discord
 
 ---
 
-## 📁 Arquivos
+## 📁 Estrutura do Projeto
 
-| Arquivo | Onde fica | Função |
-|---|---|---|
-| `bot.py` | Shardclaud | Bot Discord 24/7 |
-| `cliente_pc.py` | Seu PC | Processa pedidos com Ollama |
-| `config_bot.json` | Shardclaud | Configuração do bot |
-| `config_pc.json` | Seu PC | Configuração do cliente |
-| `personalidade.json` | Shardclaud | Tom e estilo da Alice |
-| `historico.json` | Shardclaud | Gerado automaticamente |
-| `alice_log.txt` | Seu PC | Log gerado automaticamente |
+```
+alice-1.6/
+├── cogs/
+│   └── github_cog.py          # Integração com GitHub
+├── config/
+│   ├── config_bot.json        # Configuração do bot (Shardclaud)
+│   ├── config_pc.json         # Configuração do cliente (seu PC)
+│   └── personalidade.json     # Tom e estilo da Alice
+├── core/
+│   ├── bot.py                 # Bot Discord 24/7
+│   └── cliente_pc.py          # Processa pedidos com Ollama
+├── historico.json             # Gerado automaticamente (Shardclaud)
+├── links_github.json          # Vínculos Discord-GitHub (gerado automaticamente)
+├── alice_log.txt              # Log do cliente (seu PC)
+├── requirements.txt           # Dependências Python
+└── README.md                  # Este arquivo
+```
 
 ---
 
@@ -54,7 +62,7 @@ Usuário no Discord
 
 ### PASSO 2 — Configurar os arquivos
 
-**`config_bot.json`** (vai pro Shardclaud):
+**`config/config_bot.json`** (vai pro Shardclaud):
 ```json
 {
   "discord_token": "seu_token_discord",
@@ -63,7 +71,7 @@ Usuário no Discord
 }
 ```
 
-**`config_pc.json`** (fica no seu PC):
+**`config/config_pc.json`** (fica no seu PC):
 ```json
 {
   "upstash_redis_url":   "https://seu-banco.upstash.io",
@@ -94,10 +102,10 @@ ollama serve
 
 ```bash
 # Instalar dependência (só requests — sem precisar de redis client!)
-pip install requests
+pip install -r requirements.txt
 
 # Rodar
-python cliente_pc.py
+python core/cliente_pc.py
 ```
 
 Você vai ver algo como:

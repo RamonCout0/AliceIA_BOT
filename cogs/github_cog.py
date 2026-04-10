@@ -22,8 +22,8 @@ from datetime import datetime
 # ============================================================
 # CONFIG
 # ============================================================
-BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(BASE_DIR, 'config_bot.json')
+BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'config_bot.json')
 
 with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
     _cfg = json.load(f)
